@@ -1,0 +1,6 @@
+app_type = "simple"
+python_version = "3.13"
+registered_name = "add-parameters-to-revit-types-acc"
+oauth2_integrations = [
+  "aps-integration-design"
+]

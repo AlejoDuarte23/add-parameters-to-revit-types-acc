@@ -1,0 +1,314 @@
+import base64
+import json
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Annotated, Any, Dict
+
+import requests
+import viktor as vkt
+from aps_automation_sdk.acc import parent_folder_from_item
+from aps_automation_sdk.classes import (
+    ActivityInputParameterAcc,
+    ActivityJsonParameter,
+    ActivityOutputParameterAcc,
+    WorkItemAcc,
+)
+from dotenv import load_dotenv
+
+from app.helpers import (
+    DEFAULT_REVIT_VERSION,
+    fetch_manifest,
+    get_revit_version_from_manifest,
+    get_type_parameters_signature,
+    get_viewables_from_urn,
+)
+
+load_dotenv()
+
+DA_V3 = "https://developer.api.autodesk.com/da/us-east/v3"
+
+def bearer(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+def get_workitem_status(wi_id: str, token: str) -> Dict[str, Any]:
+    url = f"{DA_V3}/workitems/{wi_id}"
+    r = requests.get(url, headers=bearer(token), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+class Parametrization(vkt.Parametrization):
+    title = vkt.Text("""# Add Parameters to Revit Types
+This app helps you add custom parameters to your Revit model elements automatically. 
+Upload your Revit file, define which parameters you want to add and which elements should get them, then view the results in 3D.""")
+    
+    input_file = vkt.AutodeskFileField("Select Your Revit File", oauth2_integration="aps-integration-design")
+    
+    suptite1 = vkt.Text("""## Parameter Table
+In this table, you define what parameters to add to which elements in your Revit model. 
+Each row specifies a parameter name (like "Carbon_Rating"), the element type and family it should be added to, 
+and the value to set. You can add multiple rows with the same parameter name to apply it to different elements.""")
+    
+    targets = vkt.Table("Targets", default=[
+        {
+            "parameter_name": "Carbon_Dataset_Code",
+            "parameter_group": "PG_DATA",
+            "type_name": "400x400mm",
+            "family_name": "CO_01_001_Geheide_prefab_betonpaal",
+            "value": "95"
+        }
+    ])
+    targets.parameter_name = vkt.TextField("Parameter Name")
+    targets.parameter_group = vkt.OptionField(
+        "Parameter Group",
+        options=["PG_TEXT", "PG_DATA", "PG_IDENTITY_DATA", "PG_GEOMETRY"]
+    )
+    targets.type_name = vkt.TextField("Type Name")
+    targets.family_name = vkt.TextField("Family Name")
+    targets.value = vkt.TextField("Value")
+    
+    text = vkt.Text("# Run Automation")
+    buttom = vkt.ActionButton("Run Automation", method="process_with_workitem")
+
+class APSResult(vkt.WebResult):
+    """Custom WebResult that renders an APS Viewer with viewable selection."""
+    
+    def __init__(self, urn: Annotated[str, "base64 encoded URN"], token: str):
+        # Get viewables from the translated model
+        viewables = []
+        if urn:
+            try:
+                viewables = get_viewables_from_urn(token, urn)
+            except Exception as e:
+                print(f"Warning: Could not fetch viewables: {e}")
+        
+        html = (Path(__file__).parent / "ViewableViewer.html").read_text()
+        html = html.replace("APS_TOKEN_PLACEHOLDER", token)
+        html = html.replace("URN_PLACEHOLDER", urn)
+        html = html.replace("VIEWABLES_PLACEHOLDER", json.dumps(viewables))
+        super().__init__(html=html)
+
+
+class Controller(vkt.Controller):
+    parametrization = Parametrization
+    
+    @vkt.WebView("APS Viewer", duration_guess=10)
+    def aps_view(self, params, **kwargs):
+        integration = vkt.external.OAuth2Integration("aps-integration-design")
+        token = integration.get_access_token()
+        
+        autodesk_file = params.input_file
+        if not autodesk_file:
+            raise vkt.UserError("Please select a model in the Autodesk file field")
+        
+        # Get the URN and encode it
+        version = autodesk_file.get_latest_version(token)
+        urn = version.urn
+        encoded_urn = base64.urlsafe_b64encode(urn.encode()).decode().rstrip("=")
+        
+        # Try to fetch manifest and extract Revit version from Model Derivative
+        try:
+            manifest = fetch_manifest(params.input_file, token)
+            vkt.UserMessage.info(f"Manifest status: {manifest.get('status', 'unknown')}")
+            
+            # Extract Revit version directly from manifest
+            revit_version = get_revit_version_from_manifest(manifest)
+            print(f"Revit Version: {revit_version}")
+            if revit_version:
+                vkt.UserMessage.info(f"Revit Version: {revit_version}")
+            else:
+                vkt.UserMessage.info("Note: Could not extract Revit version from manifest")
+        except Exception as e:
+            print(f"Error retrieving model info: {str(e)}")
+            vkt.UserMessage.info(f"Note: Could not retrieve model info: {str(e)}")
+        
+        return APSResult(urn=encoded_urn, token=token)
+
+    def process_with_workitem(self, params, **kwargs):
+        """
+        Process the CAD file with Design Automation to add type parameters using ACC,
+        then display the updated model in APS Viewer.
+        """
+        # Get OAuth2 integration for APS
+        integration = vkt.external.OAuth2Integration("aps-integration-design")
+        access_token = integration.get_access_token()
+
+        try:
+            vkt.UserMessage.info("Starting Design Automation workflow with ACC...")
+            vkt.progress_message("Preparing files...", percentage=5)
+
+            # Step 1: Get dynamic values from user's selected Revit file
+            rvt_file = params.input_file
+            if not rvt_file:
+                raise vkt.UserError("Please select an input Revit file")
+            
+            PROJECT_ID = rvt_file.project_id
+            INPUT_ITEM_LINEAGE_URN = rvt_file.urn
+            
+            vkt.UserMessage.info(f"Project ID: {PROJECT_ID}")
+            
+            # Detect Revit version from manifest
+            vkt.UserMessage.info("Detecting Revit version from model...")
+            try:
+                manifest = fetch_manifest(params.input_file, access_token)
+                revit_version = get_revit_version_from_manifest(manifest)
+                if not revit_version:
+                    revit_version = DEFAULT_REVIT_VERSION
+                    vkt.UserMessage.info(f"Could not detect Revit version, using default: {revit_version}")
+                else:
+                    vkt.UserMessage.info(f"Detected Revit Version: {revit_version}")
+            except Exception as e:
+                revit_version = DEFAULT_REVIT_VERSION
+                vkt.UserMessage.info(f"Error detecting Revit version: {e}, using default: {revit_version}")
+            
+            # Get the correct signature and activity alias for this Revit version
+            signature, activity_full_alias = get_type_parameters_signature(revit_version)
+            vkt.UserMessage.info(f"Using activity: {activity_full_alias} for Revit {revit_version}")
+            
+            vkt.UserMessage.info("Resolving target folder from input file location...")
+            vkt.progress_message("Setting up Design Automation with ACC...", percentage=15)
+
+            # Step 2: Create input parameter for Revit file
+            vkt.UserMessage.info("Setting up input Revit file from ACC...")
+            input_revit = ActivityInputParameterAcc(
+                name="rvtFile",
+                localName="input.rvt",
+                verb="get",
+                description="Input Revit File",
+                required=True,
+                is_engine_input=True,
+                project_id=PROJECT_ID,
+                linage_urn=INPUT_ITEM_LINEAGE_URN,
+            )
+            
+            # Step 3: Get folder ID from input file location
+            folder_id = parent_folder_from_item(
+                project_id=PROJECT_ID, 
+                item_id=INPUT_ITEM_LINEAGE_URN, 
+                token=access_token
+            )
+            vkt.UserMessage.info(f"Target folder resolved: {folder_id}")
+            vkt.progress_message("Generating parameter configuration...", percentage=25)
+
+            # Step 4: Create JSON configuration from params
+            vkt.UserMessage.info("Generating parameter configuration...")
+            type_params_config = self.create_json_from_params(params)
+            vkt.UserMessage.info(f"   Adding {len(type_params_config)} parameter(s)")
+            
+            # Step 5: Create JSON input parameter to upload to ACC
+            input_json = ActivityJsonParameter(
+                name="configJson",
+                file_name="revit_type_params.json",
+                localName="revit_type_params.json",
+                verb="get",
+                description="Type parameter JSON configuration",
+            )
+            input_json.set_content(type_params_config)
+            vkt.progress_message("Uploading configuration to ACC...", percentage=30)
+            
+            # Step 6: Create output parameter for result file
+            output_file = ActivityOutputParameterAcc(
+                name="result",
+                localName="output.rvt",
+                verb="put",
+                description="Result Revit model with added parameters",
+                folder_id=folder_id,
+                project_id=PROJECT_ID,
+                file_name="updated_model_with_parameters.rvt"
+            )
+            
+            # Step 7: Create and execute work item
+            vkt.UserMessage.info("Creating work item...")
+            vkt.progress_message("Running Design Automation (this may take a few minutes)...", percentage=35)
+            
+            workitem = WorkItemAcc(
+                parameters=[input_revit, input_json, output_file],
+                activity_full_alias=activity_full_alias
+            )
+            workitem_id = workitem.run_public_activity(
+                token3lo=access_token, 
+                activity_signature=signature
+            )
+            vkt.UserMessage.info(f"Workitem ID: {workitem_id}")
+
+            # Step 8: Poll workitem status
+            vkt.UserMessage.info("Polling workitem status...")
+            elapsed = 0
+            poll_interval = 10
+            max_wait = 600
+            final_status = None
+            report_url = None
+
+            while elapsed <= max_wait:
+                s = get_workitem_status(workitem_id, access_token)
+                final_status = s.get("status")
+                report_url = s.get("reportUrl")
+                percentage = min(35 + int((elapsed / max_wait) * 55), 90)
+                vkt.progress_message(f"Work item status: {final_status} [{elapsed}s]...", percentage=percentage)
+                vkt.UserMessage.info(f"[{elapsed:3d}s] status = {final_status}")
+                if final_status in ("success", "failed", "cancelled"):
+                    break
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+            if final_status != "success":
+                msg = f"Automation did not finish with success. Status: {final_status}"
+                if report_url:
+                    msg += f"\nReport URL: {report_url}"
+                raise vkt.UserError(msg)
+
+            # Step 9: Create ACC Item for the output
+            vkt.UserMessage.info("Work item completed successfully!")
+            vkt.progress_message("Creating ACC item for output...", percentage=92)
+            vkt.UserMessage.info("Creating ACC Item for the output...")
+            output_file.create_acc_item(token=access_token)
+            
+            vkt.progress_message("Updated model ready for viewing!", percentage=100)
+
+            success_msg = (
+                f"Automation completed successfully!\n\n"
+                f"Added parameters to Revit types:\n"
+                f"- {len(type_params_config)} parameter configuration(s)\n"
+                f"- Total targets: {sum(len(p['Targets']) for p in type_params_config)}\n\n"
+                f"Workitem ID: {workitem_id}\n"
+            )
+            if report_url:
+                success_msg += f"\nReport URL: {report_url}"
+
+            vkt.UserMessage.success(success_msg)
+
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            raise vkt.UserError(f"Error in Automation workflow: {str(e)}\n\nDetails:\n{error_detail}")
+    
+    @staticmethod
+    def create_json_from_params(params, **kwargs) -> list[dict[str, Any]]:
+        """
+        Create JSON configuration for type parameters.
+        Groups all targets by parameter name and parameter group.
+        Returns an array of parameter configurations, one for each unique parameter.
+        """
+        # Group rows by (parameter_name, parameter_group)
+        grouped = defaultdict(list)
+        
+        for row in params.targets:
+            key = (row["parameter_name"], row["parameter_group"])
+            grouped[key].append({
+                "TypeName": row["type_name"],
+                "FamilyName": row["family_name"],
+                "Value": row["value"]
+            })
+        
+        # Build the result array
+        result = []
+        for (param_name, param_group), targets in grouped.items():
+            result.append({
+                "ParameterName": param_name,
+                "ParameterGroup": param_group,
+                "Targets": targets
+            })
+        
+        return result
+
+
