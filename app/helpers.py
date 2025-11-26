@@ -71,19 +71,19 @@ TYPE_PARAMETERS_CONFIG = {
 # Based on the activities created in autodesk_automation - ExportIFC/create_activities_by_revit_version.ipynb
 IFC_EXPORT_VERSION_CONFIG = {
     "2023": {
-        "signature": os.getenv("viktortest.RevitIfcExportAppActivity2023+prod", ""),
+        "signature": os.getenv("RevitIfcExportAppActivity2023", ""),
         "activity_full_alias": os.getenv("ACTIVITY_FULL_ALIAS_IfcExport2023", ""),
     },
     "2024": {
-        "signature": os.getenv("viktortest.RevitIfcExportAppActivity2024+prod", ""),
+        "signature": os.getenv("RevitIfcExportAppActivity2024", ""),
         "activity_full_alias": os.getenv("ACTIVITY_FULL_ALIAS_IfcExport2024", ""),
     },
     "2025": {
-        "signature": os.getenv("viktortest.RevitIfcExportAppActivity2025+prod", ""),
+        "signature": os.getenv("RevitIfcExportAppActivity2025", ""),
         "activity_full_alias": os.getenv("ACTIVITY_FULL_ALIAS_IfcExport2025", ""),
     },
     "2026": {
-        "signature": os.getenv("viktortest.RevitIfcExportAppActivity2026+prod", ""),
+        "signature": os.getenv("RevitIfcExportAppActivity2026", ""),
         "activity_full_alias": os.getenv("ACTIVITY_FULL_ALIAS_IfcExport2026", ""),
     }
 }
