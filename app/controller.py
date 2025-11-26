@@ -66,15 +66,17 @@ def get_view_names_for_file(*, version_urn: str) -> list[str]:
 
 def get_view_names_options(params, **kwargs) -> list:
     """Callback for MultiSelectField to get available view names as OptionListElements."""
-    autodesk_file = params.step_ifc.inputs.input_file_ifc
+    autodesk_file = params.step_ifc.visualize.output_file
     if not autodesk_file:
         return []
-    
+    print("Inside")
+
     integration = vkt.external.OAuth2Integration("aps-integration-design")
     token = integration.get_access_token()
     version = autodesk_file.get_latest_version(token)
     
     view_names = get_view_names_for_file(version_urn=version.urn)
+    print(f"{view_names=}")
     
     return [vkt.OptionListElement(label=name, value=name) for name in view_names]
 
@@ -89,7 +91,8 @@ Upload your Revit file, define which parameters you want to add and which elemen
     step_params.inputs.input_file = vkt.AutodeskFileField("Select Your Revit File", oauth2_integration="aps-integration-design")
     
     step_params.table_section = vkt.Section("Parameter Table")
-    step_params.table_section.info = vkt.Text("""In this table, you define what parameters to add to which elements in your Revit model. 
+    step_params.table_section.intro = vkt.Text("""## Parameter Configuration
+In this table, you define what parameters to add to which elements in your Revit model. 
 Each row specifies a parameter name (like "Carbon_Rating"), the element type and family it should be added to, 
 and the value to set. You can add multiple rows with the same parameter name to apply it to different elements.""")
     step_params.table_section.targets = vkt.Table("Targets", default=[
@@ -111,14 +114,23 @@ and the value to set. You can add multiple rows with the same parameter name to 
     step_params.table_section.targets.value = vkt.TextField("Value")
     
     step_params.action = vkt.Section("Run Automation")
+    step_params.action.intro = vkt.Text("""## Run Automation
+Click the button below to generate the updated Revit model with your custom parameters. 
+The automation will process your file and add all specified parameters to the target element types.""")
     step_params.action.button = vkt.ActionButton("Run Automation", method="process_with_workitem")
     
     # Step 2: IFC Export
-    step_ifc = vkt.Step("IFC Export", views=["autodesk_view"])
+    step_ifc = vkt.Step("IFC Export", views=["aps_view_step2"])
+    
+    step_ifc.visualize = vkt.Section("Visualize Output File")
+    step_ifc.visualize.intro = vkt.Text("""## View Updated Model
+Use the Autodesk file field below to display the updated model with the added type parameters. 
+After running the automation in Step 1, select the generated output file to visualize and verify that your parameters were successfully added to the Revit types.""")
+    step_ifc.visualize.output_file = vkt.AutodeskFileField("Select Updated Revit File", oauth2_integration="aps-integration-design")
+    
     step_ifc.inputs = vkt.Section("IFC Export Settings")
-    step_ifc.inputs.intro = vkt.Text("""# IFC Export
-Export a Revit file to IFC format. Select one or more views to include in the export.""")
-    step_ifc.inputs.input_file_ifc = vkt.AutodeskFileField("Select Revit File for IFC Export", oauth2_integration="aps-integration-design")
+    step_ifc.inputs.intro = vkt.Text("""## Export to IFC
+Select one or more views from the model above to export to IFC format.""")
     step_ifc.inputs.selected_views_for_ifc = vkt.MultiSelectField(
         "Select view(s) to export to IFC",
         options=get_view_names_options,
@@ -180,16 +192,21 @@ class Controller(vkt.Controller):
         
         return APSResult(urn=encoded_urn, token=token)
 
-    @vkt.AutodeskView("Autodesk Viewer", duration_guess=10)
-    def autodesk_view(self, params, **kwargs):
+    @vkt.WebView("APS Viewer", duration_guess=10)
+    def aps_view_step2(self, params, **kwargs):
         integration = vkt.external.OAuth2Integration("aps-integration-design")
         token = integration.get_access_token()
         
-        autodesk_file = params.step_ifc.inputs.input_file_ifc
+        autodesk_file = params.step_ifc.visualize.output_file
         if not autodesk_file:
-            raise vkt.UserError("Please select a model in the Autodesk file field")
+            raise vkt.UserError("Please select the updated Revit file in the 'View Updated Model' section")
         
-        return vkt.AutodeskResult(autodesk_file, access_token=token)
+        # Get the URN and encode it
+        version = autodesk_file.get_latest_version(token)
+        urn = version.urn
+        encoded_urn = base64.urlsafe_b64encode(urn.encode()).decode().rstrip("=")
+        
+        return APSResult(urn=encoded_urn, token=token)
 
     def process_with_workitem(self, params, **kwargs):
         """
@@ -392,9 +409,9 @@ class Controller(vkt.Controller):
             vkt.progress_message("Preparing files...", percentage=5)
 
             # Step 1: Validate inputs
-            rvt_file = params.step_ifc.inputs.input_file_ifc
+            rvt_file = params.step_ifc.visualize.output_file
             if not rvt_file:
-                raise vkt.UserError("Please select an input Revit file")
+                raise vkt.UserError("Please select the updated Revit file in the 'View Updated Model' section")
             
             if not params.step_ifc.inputs.selected_views_for_ifc:
                 raise vkt.UserError("Please select at least one view to export to IFC.")
@@ -407,7 +424,7 @@ class Controller(vkt.Controller):
             # Step 2: Detect Revit version from manifest
             vkt.UserMessage.info("Detecting Revit version from model...")
             try:
-                manifest = fetch_manifest(params.step_ifc.inputs.input_file_ifc, access_token)
+                manifest = fetch_manifest(params.step_ifc.visualize.output_file, access_token)
                 revit_version = get_revit_version_from_manifest(manifest)
                 if not revit_version:
                     revit_version = DEFAULT_REVIT_VERSION
