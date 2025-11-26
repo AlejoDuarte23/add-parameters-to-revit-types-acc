@@ -66,7 +66,7 @@ def get_view_names_for_file(*, version_urn: str) -> list[str]:
 
 def get_view_names_options(params, **kwargs) -> list:
     """Callback for MultiSelectField to get available view names as OptionListElements."""
-    autodesk_file = params.input_file
+    autodesk_file = params.step_ifc.inputs.input_file_ifc
     if not autodesk_file:
         return []
     
@@ -78,19 +78,21 @@ def get_view_names_options(params, **kwargs) -> list:
     
     return [vkt.OptionListElement(label=name, value=name) for name in view_names]
 
+
 class Parametrization(vkt.Parametrization):
-    title = vkt.Text("""# Add Parameters to Revit Types
+    # Step 1: Add Parameters to Revit Types
+    step_params = vkt.Step("Add Parameters", views=["aps_view"])
+    step_params.inputs = vkt.Section("Inputs")
+    step_params.inputs.intro = vkt.Text("""# Add Parameters to Revit Types
 This app helps you add custom parameters to your Revit model elements automatically. 
 Upload your Revit file, define which parameters you want to add and which elements should get them, then view the results in 3D.""")
+    step_params.inputs.input_file = vkt.AutodeskFileField("Select Your Revit File", oauth2_integration="aps-integration-design")
     
-    input_file = vkt.AutodeskFileField("Select Your Revit File", oauth2_integration="aps-integration-design")
-    
-    suptite1 = vkt.Text("""## Parameter Table
-In this table, you define what parameters to add to which elements in your Revit model. 
+    step_params.table_section = vkt.Section("Parameter Table")
+    step_params.table_section.info = vkt.Text("""In this table, you define what parameters to add to which elements in your Revit model. 
 Each row specifies a parameter name (like "Carbon_Rating"), the element type and family it should be added to, 
 and the value to set. You can add multiple rows with the same parameter name to apply it to different elements.""")
-    
-    targets = vkt.Table("Targets", default=[
+    step_params.table_section.targets = vkt.Table("Targets", default=[
         {
             "parameter_name": "Carbon_Dataset_Code",
             "parameter_group": "PG_DATA",
@@ -99,29 +101,30 @@ and the value to set. You can add multiple rows with the same parameter name to 
             "value": "95"
         }
     ])
-    targets.parameter_name = vkt.TextField("Parameter Name")
-    targets.parameter_group = vkt.OptionField(
+    step_params.table_section.targets.parameter_name = vkt.TextField("Parameter Name")
+    step_params.table_section.targets.parameter_group = vkt.OptionField(
         "Parameter Group",
         options=["PG_TEXT", "PG_DATA", "PG_IDENTITY_DATA", "PG_GEOMETRY"]
     )
-    targets.type_name = vkt.TextField("Type Name")
-    targets.family_name = vkt.TextField("Family Name")
-    targets.value = vkt.TextField("Value")
+    step_params.table_section.targets.type_name = vkt.TextField("Type Name")
+    step_params.table_section.targets.family_name = vkt.TextField("Family Name")
+    step_params.table_section.targets.value = vkt.TextField("Value")
     
-    text = vkt.Text("# Run Automation")
-    buttom = vkt.ActionButton("Run Automation", method="process_with_workitem")
+    step_params.action = vkt.Section("Run Automation")
+    step_params.action.button = vkt.ActionButton("Run Automation", method="process_with_workitem")
     
-    ifc_title = vkt.Text("# IFC Export")
-    ifc_description = vkt.Text(
-        "Export the selected Revit file to IFC format. "
-        "Select one or more views to include in the export."
-    )
-    selected_views_for_ifc = vkt.MultiSelectField(
+    # Step 2: IFC Export
+    step_ifc = vkt.Step("IFC Export", views=["autodesk_view"])
+    step_ifc.inputs = vkt.Section("IFC Export Settings")
+    step_ifc.inputs.intro = vkt.Text("""# IFC Export
+Export a Revit file to IFC format. Select one or more views to include in the export.""")
+    step_ifc.inputs.input_file_ifc = vkt.AutodeskFileField("Select Revit File for IFC Export", oauth2_integration="aps-integration-design")
+    step_ifc.inputs.selected_views_for_ifc = vkt.MultiSelectField(
         "Select view(s) to export to IFC",
         options=get_view_names_options,
         description="Select one or more views to export to IFC format"
     )
-    export_ifc_button = vkt.ActionButton("Export to IFC", method="export_to_ifc")
+    step_ifc.inputs.export_ifc_button = vkt.ActionButton("Export to IFC", method="export_to_ifc")
 
 class APSResult(vkt.WebResult):
     """Custom WebResult that renders an APS Viewer with viewable selection."""
@@ -150,7 +153,7 @@ class Controller(vkt.Controller):
         integration = vkt.external.OAuth2Integration("aps-integration-design")
         token = integration.get_access_token()
         
-        autodesk_file = params.input_file
+        autodesk_file = params.step_params.inputs.input_file
         if not autodesk_file:
             raise vkt.UserError("Please select a model in the Autodesk file field")
         
@@ -161,7 +164,7 @@ class Controller(vkt.Controller):
         
         # Try to fetch manifest and extract Revit version from Model Derivative
         try:
-            manifest = fetch_manifest(params.input_file, token)
+            manifest = fetch_manifest(params.step_params.inputs.input_file, token)
             vkt.UserMessage.info(f"Manifest status: {manifest.get('status', 'unknown')}")
             
             # Extract Revit version directly from manifest
@@ -177,6 +180,17 @@ class Controller(vkt.Controller):
         
         return APSResult(urn=encoded_urn, token=token)
 
+    @vkt.AutodeskView("Autodesk Viewer", duration_guess=10)
+    def autodesk_view(self, params, **kwargs):
+        integration = vkt.external.OAuth2Integration("aps-integration-design")
+        token = integration.get_access_token()
+        
+        autodesk_file = params.step_ifc.inputs.input_file_ifc
+        if not autodesk_file:
+            raise vkt.UserError("Please select a model in the Autodesk file field")
+        
+        return vkt.AutodeskResult(autodesk_file, access_token=token)
+
     def process_with_workitem(self, params, **kwargs):
         """
         Process the CAD file with Design Automation to add type parameters using ACC,
@@ -191,7 +205,7 @@ class Controller(vkt.Controller):
             vkt.progress_message("Preparing files...", percentage=5)
 
             # Step 1: Get dynamic values from user's selected Revit file
-            rvt_file = params.input_file
+            rvt_file = params.step_params.inputs.input_file
             if not rvt_file:
                 raise vkt.UserError("Please select an input Revit file")
             
@@ -203,7 +217,7 @@ class Controller(vkt.Controller):
             # Detect Revit version from manifest
             vkt.UserMessage.info("Detecting Revit version from model...")
             try:
-                manifest = fetch_manifest(params.input_file, access_token)
+                manifest = fetch_manifest(params.step_params.inputs.input_file, access_token)
                 revit_version = get_revit_version_from_manifest(manifest)
                 if not revit_version:
                     revit_version = DEFAULT_REVIT_VERSION
@@ -345,7 +359,7 @@ class Controller(vkt.Controller):
         # Group rows by (parameter_name, parameter_group)
         grouped = defaultdict(list)
         
-        for row in params.targets:
+        for row in params.step_params.table_section.targets:
             key = (row["parameter_name"], row["parameter_group"])
             grouped[key].append({
                 "TypeName": row["type_name"],
@@ -378,11 +392,11 @@ class Controller(vkt.Controller):
             vkt.progress_message("Preparing files...", percentage=5)
 
             # Step 1: Validate inputs
-            rvt_file = params.input_file
+            rvt_file = params.step_ifc.inputs.input_file_ifc
             if not rvt_file:
                 raise vkt.UserError("Please select an input Revit file")
             
-            if not params.selected_views_for_ifc:
+            if not params.step_ifc.inputs.selected_views_for_ifc:
                 raise vkt.UserError("Please select at least one view to export to IFC.")
 
             PROJECT_ID = rvt_file.project_id
@@ -393,7 +407,7 @@ class Controller(vkt.Controller):
             # Step 2: Detect Revit version from manifest
             vkt.UserMessage.info("Detecting Revit version from model...")
             try:
-                manifest = fetch_manifest(params.input_file, access_token)
+                manifest = fetch_manifest(params.step_ifc.inputs.input_file_ifc, access_token)
                 revit_version = get_revit_version_from_manifest(manifest)
                 if not revit_version:
                     revit_version = DEFAULT_REVIT_VERSION
@@ -434,8 +448,8 @@ class Controller(vkt.Controller):
             vkt.progress_message("Preparing IFC export settings...", percentage=25)
 
             # Step 6: Create IFC export configuration
-            vkt.UserMessage.info(f"Creating IFC export configuration for {len(params.selected_views_for_ifc)} view(s)...")
-            ifc_config = create_ifc_export_json(params.selected_views_for_ifc)
+            vkt.UserMessage.info(f"Creating IFC export configuration for {len(params.step_ifc.inputs.selected_views_for_ifc)} view(s)...")
+            ifc_config = create_ifc_export_json(params.step_ifc.inputs.selected_views_for_ifc)
             
             input_json = ActivityJsonParameter(
                 name="ifcSettings",
@@ -508,8 +522,8 @@ class Controller(vkt.Controller):
 
             success_msg = (
                 f"IFC Export completed successfully!\n\n"
-                f"Exported views: {len(params.selected_views_for_ifc)}\n"
-                f"- {', '.join(params.selected_views_for_ifc)}\n\n"
+                f"Exported views: {len(params.step_ifc.inputs.selected_views_for_ifc)}\n"
+                f"- {', '.join(params.step_ifc.inputs.selected_views_for_ifc)}\n\n"
                 f"Output file: IFC_Export.zip\n"
                 f"Workitem ID: {workitem_id}\n"
             )
