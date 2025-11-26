@@ -168,5 +168,79 @@ def get_viewables_from_urn(token:str, object_urn: str) -> list[dict[str, Any]]:
     
     print(f"Found {len(viewables)} viewable(s) in manifest")
     
-    # Store viewables in Viktor storage if requested
     return viewables
+
+
+def get_view_names_from_manifest(manifest: dict) -> list[str]:
+    """
+    Extract view names from a model derivative manifest for IFC export selection.
+    Returns a list of view names that can be used in MultiSelectField options.
+    """
+    seen = set()
+    view_names = []
+    
+    for derivative in manifest.get("derivatives", []):
+        if derivative.get("outputType") in ["svf", "svf2"]:
+            for geometry_node in derivative.get("children", []):
+                if geometry_node.get("type") == "geometry" and geometry_node.get("role") in ["3d", "2d"]:
+                    # base name is the geometry node name
+                    base_name = geometry_node.get("name", "")
+                    candidate_names = [base_name]
+                    # if there is a child of type view with its own name, include that too
+                    for child_node in geometry_node.get("children", []):
+                        if child_node.get("type") == "view":
+                            name = child_node.get("name", "") or base_name
+                            candidate_names.append(name)
+                    for name in candidate_names:
+                        if not name:
+                            continue
+                        # remove any cosmetic prefixes
+                        clean = name.replace("[3D] ", "").replace("[2D] ", "")
+                        if clean not in seen:
+                            seen.add(clean)
+                            view_names.append(clean)
+    
+    print(f"Found {len(view_names)} view name(s) in manifest")
+    return view_names
+
+
+def create_ifc_export_json(selected_view_names: list[str]) -> dict[str, Any]:
+    """
+    Create IFC export settings JSON configuration from selected view names.
+    """
+    config = {
+        "view_names": selected_view_names,
+        "FileVersion": "IFC4",
+        "IFCFileType": "IFC",
+        "ExportBaseQuantities": True,
+        "SpaceBoundaryLevel": 2,
+        "FamilyMappingFile": "",
+        "ExportInternalRevitPropertySets": False,
+        "ExportIFCCommonPropertySets": True,
+        "ExportAnnotations": False,
+        "Export2DElements": False,
+        "ExportRoomsInView": False,
+        "VisibleElementsOfCurrentView": False,
+        "ExportLinkedFiles": False,
+        "IncludeSteelElements": False,
+        "ExportPartsAsBuildingElements": True,
+        "UseActiveViewGeometry": False,
+        "UseFamilyAndTypeNameForReference": False,
+        "Use2DRoomBoundaryForVolume": False,
+        "IncludeSiteElevation": False,
+        "ExportBoundingBox": False,
+        "ExportSolidModelRep": False,
+        "StoreIFCGUID": False,
+        "ExportSchedulesAsPsets": False,
+        "ExportSpecificSchedules": False,
+        "ExportUserDefinedPsets": False,
+        "ExportUserDefinedPsetsFileName": "",
+        "ExportUserDefinedParameterMapping": False,
+        "ExportUserDefinedParameterMappingFileName": "",
+        "ActivePhase": "",
+        "SitePlacement": 0,
+        "TessellationLevelOfDetail": 0.0,
+        "UseOnlyTriangulation": False
+    }
+    
+    return config
