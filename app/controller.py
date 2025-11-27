@@ -1,6 +1,7 @@
 import base64
 import json
 import time
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Annotated, Any, Dict
@@ -228,7 +229,11 @@ class Controller(vkt.Controller):
             
             PROJECT_ID = rvt_file.project_id
             INPUT_ITEM_LINEAGE_URN = rvt_file.urn
-            
+            integration = vkt.external.OAuth2Integration("aps-integration-design")
+            token = integration.get_access_token()
+            version = rvt_file.get_latest_version(token)
+            attrs = version.attributes  # dict
+            display_name = attrs.get("displayName", "model")
             vkt.UserMessage.info(f"Project ID: {PROJECT_ID}")
             
             # Detect Revit version from manifest
@@ -291,6 +296,8 @@ class Controller(vkt.Controller):
             vkt.progress_message("Uploading configuration to ACC...", percentage=30)
             
             # Step 6: Create output parameter for result file
+            short_uuid = uuid.uuid4().hex[:8]
+            output_filename = f"{display_name}_{short_uuid}.rvt"
             output_file = ActivityOutputParameterAcc(
                 name="result",
                 localName="output.rvt",
@@ -298,7 +305,7 @@ class Controller(vkt.Controller):
                 description="Result Revit model with added parameters",
                 folder_id=folder_id,
                 project_id=PROJECT_ID,
-                file_name="updated_model_with_parameters.rvt"
+                file_name=output_filename
             )
             
             # Step 7: Create and execute work item
@@ -479,6 +486,13 @@ class Controller(vkt.Controller):
             vkt.progress_message("Uploading IFC configuration to ACC...", percentage=30)
             
             # Step 7: Create output parameter for ZIP file (stored in ACC)
+            # Get display name from the input file
+            version = rvt_file.get_latest_version(access_token)
+            attrs = version.attributes
+            display_name = attrs.get("displayName", "model")
+            short_uuid = uuid.uuid4().hex[:8]
+            output_zip_filename = f"{display_name}_IFC_{short_uuid}.zip"
+            
             output_zip = ActivityOutputParameterAcc(
                 name="result",
                 localName="result.zip",
@@ -486,7 +500,7 @@ class Controller(vkt.Controller):
                 description="Zipped IFC files",
                 folder_id=folder_id,
                 project_id=PROJECT_ID,
-                file_name="IFC_Export.zip"
+                file_name=output_zip_filename
             )
             
             # Step 8: Create and execute work item
